@@ -3,27 +3,51 @@ using Mciec.Drivers;
 using Iot.Device.Hcsr04;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
 
 
 namespace console01
 {
     class Program
     {
+        private const double SwitchDistance = 10.0;
         private static double Distance;
+        static EventWaitHandle objectClose = new EventWaitHandle(false, EventResetMode.AutoReset);
+        static EventWaitHandle objectFar = new EventWaitHandle(false, EventResetMode.AutoReset);
 
         private static async void DoPing(Object stateObject)
         {
+            double prevDistance = 200.0;
             CancellationToken ct = (CancellationToken)stateObject;
             Hcsr04 sonar = new Hcsr04(18, 24);
             while (!ct.IsCancellationRequested)
             {
-                Distance = sonar.Distance.Centimeters;
-                Console.WriteLine($"Distance: {Distance}");
+                try
+                {
+                    Distance = sonar.Distance.Centimeters;
+                }
+                catch { }
+                //Console.WriteLine($"Distance: {Distance}");
+                if (prevDistance <= SwitchDistance && Distance > SwitchDistance)
+                {
+                    objectClose.Reset();
+                    objectFar.Set();
+                    Console.WriteLine("-------------OPEN---------------");
+                }
+                else
+                if (prevDistance > SwitchDistance && Distance <= SwitchDistance)
+                {
+                    objectFar.Reset();
+                    objectClose.Set();
+                    Console.WriteLine("-------------CLOSE--------------");
+                }
+                prevDistance = Distance;
                 await Task.Delay(100);
             }
         }
 
-        private static async void ControlServo(Object stateObject){
+        private static async void ControlServo(Object stateObject)
+        {
             CancellationToken ct = (CancellationToken)stateObject;
 
             using (var servoHat = new ServoHat(0b1000000, 15))
@@ -31,8 +55,10 @@ namespace console01
                 servoHat.Init();
                 servoHat.Calibrate(180, 420, 2650);
                 servoHat.WriteAngle(90);
-                while (!ct.IsCancellationRequested){
-                    while (Distance < 10){
+                while (!ct.IsCancellationRequested)
+                {
+                    while (Distance < 10)
+                    {
                         servoHat.WriteAngle(0);
                         await Task.Delay(5000);
                     }
@@ -41,7 +67,30 @@ namespace console01
             }
         }
 
-
+        private static async void ControlServoBySignal(Object stateObject)
+        {
+            CancellationToken ct = (CancellationToken)stateObject;
+            Stopwatch sw = new Stopwatch();
+            using (var servoHat = new ServoHat(0b1000000, 15))
+            {
+                servoHat.Init();
+                servoHat.Calibrate(180, 420, 2650);
+                servoHat.WriteAngle(90);
+                while (!ct.IsCancellationRequested)
+                {
+                    Console.WriteLine("Open. Waiting for CLOSE signal...");
+                    objectClose.WaitOne();
+                    servoHat.WriteAngle(0);
+                    do
+                    {
+                        Console.WriteLine("Close. CLOSE signal received. Waiting for OPEN signal...");
+                        objectFar.WaitOne();                       
+                        Console.WriteLine("Close. OPEN signal received. Waiting 5sec...");
+                    } while (objectClose.WaitOne(5000));                   
+                    servoHat.WriteAngle(90);
+                }
+            }
+        }
 
         static void Main(string[] args)
         {
@@ -51,7 +100,7 @@ namespace console01
             CancellationToken cancellationToken = cancellationTokenSource.Token;
             //Task<void> task= 
             Task.Factory.StartNew(stateObject => DoPing(stateObject), cancellationToken);
-            Task.Factory.StartNew(stateObject => ControlServo(stateObject), cancellationToken);
+            Task.Factory.StartNew(stateObject => ControlServoBySignal(stateObject), cancellationToken);
             Console.ReadLine();
             cancellationTokenSource.Cancel();
             Task.Delay(5000).GetAwaiter().GetResult();
